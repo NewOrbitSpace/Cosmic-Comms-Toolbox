@@ -1,0 +1,11 @@
+PySide6>=6.6
+numpy>=1.26
+orekit>=12.0
+pandas>=2.0
+pyqtgraph>=0.13
+matplotlib>=3.8
+cartopy>=0.22
+moderngl>=5.8
+itur>=0.4
+astropy>=5.0
+
