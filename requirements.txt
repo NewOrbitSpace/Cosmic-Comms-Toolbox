@@ -9,3 +9,6 @@ moderngl>=5.8
 itur>=0.4
 astropy>=5.0
 
+# Orekit data package (installed directly from Git)
+git+https://gitlab.orekit.org/orekit/orekit-data.git
+
