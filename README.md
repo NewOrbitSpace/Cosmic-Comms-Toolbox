@@ -76,4 +76,5 @@ table at the bottom of the window.
   set `QT_QPA_PLATFORM=offscreen` to let Qt create an off-screen context.
 - Feature parity targets are summarized in `docs/globe_renderer_requirements.md`.
 
-
+## License
+This project is licensed under the MIT License — see the LICENSE file for details.
