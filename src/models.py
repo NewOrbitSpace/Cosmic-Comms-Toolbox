@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List
 
@@ -37,6 +37,28 @@ class PropagationConfig:
     min_elevation_deg: float
     sample_step_seconds: float
     enable_drag: bool
+    # Spacecraft drag properties (used when enable_drag is True).
+    # Defaults match the previous hard-coded IsotropicDrag(1.0, 2.2) setup.
+    drag_area_m2: float = 0.43
+    drag_cd: float = 3.0
+
+
+@dataclass
+class ThrusterConfig:
+    """Configuration for a simple prograde thruster + deadband controller."""
+
+    enabled: bool = False
+    thrust_N: float = 0.0
+    mass_kg: float = 0.0
+    target_altitude_km: float = 0.0
+    deadband_width_km: float = 0.0
+
+
+@dataclass
+class AnalysisOptions:
+    """Toggle which high-level analyses are performed for a run."""
+
+    compute_ground_station_passes: bool = True
 
 
 @dataclass
@@ -51,10 +73,15 @@ class ScenarioConfig:
 class AnalysisConfig:
     """Aggregates all input required to run the Orekit analysis."""
 
-    ground_station: GroundStationConfig
+    # Primary ground station used when ground-station analysis is enabled.
+    # When ground-station analysis is disabled, this may be None.
+    ground_station: GroundStationConfig | None
     orbit: OrbitConfig
     propagation: PropagationConfig
     scenario: ScenarioConfig
+    options: AnalysisOptions = field(default_factory=AnalysisOptions)
+    # Optional thruster/controller configuration for drag-compensation studies.
+    thruster: ThrusterConfig | None = None
 
 
 @dataclass
@@ -113,3 +140,17 @@ class AnalysisResult:
     timeline_seconds: List[float]
     station_elevation_series: dict[str, List[float]]
     orbit_period_seconds: float
+    # Optional per-sample orbital metrics for the Orbit Summary tab.
+    orbital_altitude_km: List[float] = field(default_factory=list)
+    semi_major_axis_km: List[float] = field(default_factory=list)
+    perigee_altitude_km: List[float] = field(default_factory=list)
+    apogee_altitude_km: List[float] = field(default_factory=list)
+    eccentricity: List[float] = field(default_factory=list)
+    argument_of_perigee_deg: List[float] = field(default_factory=list)
+    orbital_period_series_s: List[float] = field(default_factory=list)
+    density_kg_m3: List[float] = field(default_factory=list)
+    dynamic_pressure_pa: List[float] = field(default_factory=list)
+    true_anomaly_deg: List[float] = field(default_factory=list)
+    # Optional per-sample force diagnostics (positive magnitudes).
+    drag_force_N: List[float] = field(default_factory=list)
+    thrust_force_N: List[float] = field(default_factory=list)

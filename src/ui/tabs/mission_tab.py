@@ -34,7 +34,7 @@ class MissionTabMixin:
     """Logic for building and updating the mission analysis tab."""
 
     def _build_mission_analysis_tab(self) -> QWidget:
-        """Create the Mission Analysis tab with configuration and mission map."""
+        """Create the Mission Configuration tab with configuration and mission map."""
         tab = QWidget()
         tab_layout = QVBoxLayout(tab)
         config_widget = QWidget()
@@ -43,10 +43,22 @@ class MissionTabMixin:
         config_layout.addWidget(self._build_scenario_group())
         config_layout.addWidget(self._build_propagation_group())
         button_row = QHBoxLayout()
+        # Stack Run/Stop vertically so the stop button appears directly under Run.
+        button_column = QVBoxLayout()
         self.run_button = QPushButton("Run Analysis")
         self._set_run_button_state("dirty")
         self.run_button.clicked.connect(self._handle_run_clicked)  # type: ignore[arg-type]
-        button_row.addWidget(self.run_button)
+        button_column.addWidget(self.run_button)
+        # Stop button is disabled until a run is in progress.
+        from PySide6.QtWidgets import QPushButton as _QPushButtonAlias  # local alias to avoid circular import hints
+
+        self.stop_button = getattr(self, "stop_button", None)
+        if self.stop_button is None:
+            self.stop_button = _QPushButtonAlias("Stop")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self._handle_stop_clicked)  # type: ignore[arg-type]
+        button_column.addWidget(self.stop_button)
+        button_row.addLayout(button_column)
         self.run_progress = QProgressBar()
         self.run_progress.setRange(0, 100)
         self.run_progress.setValue(0)
@@ -75,13 +87,8 @@ class MissionTabMixin:
         config_layout.addStretch(1)
         analysis_widget = QWidget()
         analysis_layout = QVBoxLayout(analysis_widget)
-        mission_right_splitter = QSplitter(Qt.Orientation.Vertical)
-        mission_right_splitter.addWidget(self._build_mission_globe_panel())
-        analysis_tabs = self._build_analysis_tabs()
-        mission_right_splitter.addWidget(analysis_tabs)
-        mission_right_splitter.setStretchFactor(0, 2)
-        mission_right_splitter.setStretchFactor(1, 3)
-        analysis_layout.addWidget(mission_right_splitter)
+        # Mission tab now focuses on configuration + orbit overview globe.
+        analysis_layout.addWidget(self._build_mission_globe_panel())
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(config_widget)
         splitter.addWidget(analysis_widget)
@@ -149,7 +156,7 @@ class MissionTabMixin:
         self.raan_input.setSuffix(" °")
         self.argp_input = QDoubleSpinBox()
         self.argp_input.setRange(0.0, 360.0)
-        self.argp_input.setValue(0.0)
+        self.argp_input.setValue(90.0)
         self.argp_input.setSuffix(" °")
         self.mean_anom_input = QDoubleSpinBox()
         self.mean_anom_input.setRange(0.0, 360.0)
@@ -191,9 +198,10 @@ class MissionTabMixin:
         return group
 
     def _build_propagation_group(self) -> QGroupBox:
-        """Create controls for propagator selection and sampling."""
-        group = QGroupBox("Propagation & Access")
-        form = QFormLayout(group)
+        """Create controls for propagation and high-level analysis options."""
+        group = QGroupBox("Analysis Configuration")
+        layout = QVBoxLayout(group)
+        form = QFormLayout()
         self.propagator_combo = QComboBox()
         self.propagator_combo.addItems(["numerical", "keplerian"])
         self.min_elev_input = QDoubleSpinBox()
@@ -202,24 +210,45 @@ class MissionTabMixin:
         self.sample_step_input = QSpinBox()
         self.sample_step_input.setRange(10, 3600)
         self.sample_step_input.setValue(60)
+        form.addRow("Propagator:", self.propagator_combo)
+        self.propagator_combo.currentIndexChanged.connect(lambda *_: self._mark_dirty())
+        form.addRow("Sample Step (s):", self.sample_step_input)
+        self.sample_step_input.valueChanged.connect(lambda *_: self._mark_dirty())
+        layout.addLayout(form)
+
+        # Ground-station analysis settings and toggles
+        from PySide6.QtWidgets import QCheckBox
+
+        self.gs_access_group = QGroupBox("Ground-station Pass Settings")
+        gs_form = QFormLayout(self.gs_access_group)
+        self.ground_pass_checkbox = getattr(self, "ground_pass_checkbox", None)
+        if self.ground_pass_checkbox is None:
+            self.ground_pass_checkbox = QCheckBox("Include ground-station passes")
+        # Start unchecked, but keep the group enabled so the user can always
+        # re-toggle the option; only the analysis behavior depends on the state.
+        self.ground_pass_checkbox.setChecked(False)
+        self.ground_pass_checkbox.stateChanged.connect(
+            self._handle_analysis_options_changed
+        )  # type: ignore[arg-type]
+        gs_form.addRow(self.ground_pass_checkbox)
+        gs_form.addRow("Min Elevation (deg):", self.min_elev_input)
+        self.min_elev_input.valueChanged.connect(lambda *_: self._mark_dirty())
+        layout.addWidget(self.gs_access_group)
+
+        # Drag configuration in its own box
         self.drag_checkbox = getattr(self, "drag_checkbox", None)
         if self.drag_checkbox is None:
             from PySide6.QtWidgets import QCheckBox
 
+            # Keep the label simple as requested.
             self.drag_checkbox = QCheckBox("Include drag")
+        # Start with drag enabled by default.
         self.drag_checkbox.setChecked(True)
         self.drag_checkbox.stateChanged.connect(self._handle_drag_toggle)  # type: ignore[arg-type]
-        form.addRow("Propagator:", self.propagator_combo)
-        self.propagator_combo.currentIndexChanged.connect(lambda *_: self._mark_dirty())
-        form.addRow("Min Elevation (deg):", self.min_elev_input)
-        self.min_elev_input.valueChanged.connect(lambda *_: self._mark_dirty())
-        form.addRow("Sample Step (s):", self.sample_step_input)
-        self.sample_step_input.valueChanged.connect(lambda *_: self._mark_dirty())
-        form.addRow("Drag:", self.drag_checkbox)
         self.drag_area_input = QDoubleSpinBox()
         self.drag_area_input.setRange(0.01, 100.0)
         self.drag_area_input.setSingleStep(0.05)
-        self.drag_area_input.setValue(2.0)
+        self.drag_area_input.setValue(0.43)
         self.drag_area_input.setSuffix(" m²")
         self.drag_area_input.valueChanged.connect(
             lambda *_: self._handle_drag_parameters_changed()
@@ -227,7 +256,7 @@ class MissionTabMixin:
         self.drag_cd_input = QDoubleSpinBox()
         self.drag_cd_input.setRange(1.0, 5.0)
         self.drag_cd_input.setSingleStep(0.1)
-        self.drag_cd_input.setValue(2.2)
+        self.drag_cd_input.setValue(3.0)
         self.drag_cd_input.valueChanged.connect(
             lambda *_: self._handle_drag_parameters_changed()
         )
@@ -239,13 +268,83 @@ class MissionTabMixin:
         params_layout.addRow("Drag coefficient:", self.drag_cd_input)
         params_layout.addRow("C_d × A:", self.drag_cd_area_label)
         self.drag_params_group.setEnabled(self.drag_checkbox.isChecked())
-        form.addRow(self.drag_params_group)
+
+        self.drag_group = QGroupBox("Drag Configuration")
+        drag_form = QFormLayout(self.drag_group)
+        # Just show the checkbox with its label, without an extra \"Enable drag:\"
+        # caption row.
+        drag_form.addRow(self.drag_checkbox)
+        drag_form.addRow(self.drag_params_group)
+        layout.addWidget(self.drag_group)
+
+        # Thruster + controller configuration in its own box
+        from PySide6.QtWidgets import QCheckBox
+
+        self.thruster_group = QGroupBox("Thruster & Altitude-Hold Controller")
+        thruster_form = QFormLayout(self.thruster_group)
+        self.thruster_enable_checkbox = getattr(self, "thruster_enable_checkbox", None)
+        if self.thruster_enable_checkbox is None:
+            self.thruster_enable_checkbox = QCheckBox(
+                "Enable prograde thruster to counteract drag"
+            )
+        # Start with the thruster controller enabled by default.
+        self.thruster_enable_checkbox.setChecked(True)
+        self.thruster_enable_checkbox.stateChanged.connect(
+            self._handle_thruster_options_changed
+        )  # type: ignore[arg-type]
+        thruster_form.addRow(self.thruster_enable_checkbox)
+
+        self.thruster_thrust_input = QDoubleSpinBox()
+        self.thruster_thrust_input.setRange(0.0, 1000.0)
+        self.thruster_thrust_input.setDecimals(3)
+        self.thruster_thrust_input.setSingleStep(0.01)
+        self.thruster_thrust_input.setValue(0.01)
+        self.thruster_thrust_input.setSuffix(" N")
+        self.thruster_thrust_input.valueChanged.connect(lambda *_: self._mark_dirty())
+        thruster_form.addRow("Thrust:", self.thruster_thrust_input)
+
+        self.thruster_mass_input = QDoubleSpinBox()
+        self.thruster_mass_input.setRange(1.0, 10_000.0)
+        self.thruster_mass_input.setDecimals(1)
+        self.thruster_mass_input.setSingleStep(1.0)
+        self.thruster_mass_input.setValue(200.0)
+        self.thruster_mass_input.setSuffix(" kg")
+        self.thruster_mass_input.valueChanged.connect(lambda *_: self._mark_dirty())
+        thruster_form.addRow("Spacecraft mass:", self.thruster_mass_input)
+
+        self.thruster_target_altitude_input = QDoubleSpinBox()
+        self.thruster_target_altitude_input.setRange(150.0, 50_000.0)
+        self.thruster_target_altitude_input.setDecimals(1)
+        self.thruster_target_altitude_input.setSingleStep(5.0)
+        self.thruster_target_altitude_input.setValue(250.0)
+        self.thruster_target_altitude_input.setSuffix(" km")
+        self.thruster_target_altitude_input.valueChanged.connect(
+            lambda *_: self._mark_dirty()
+        )
+        thruster_form.addRow("Target geodetic altitude:", self.thruster_target_altitude_input)
+
+        self.thruster_deadband_width_input = QDoubleSpinBox()
+        self.thruster_deadband_width_input.setRange(1.0, 5000.0)
+        self.thruster_deadband_width_input.setDecimals(1)
+        self.thruster_deadband_width_input.setSingleStep(1.0)
+        self.thruster_deadband_width_input.setValue(1.0)
+        self.thruster_deadband_width_input.setSuffix(" km")
+        self.thruster_deadband_width_input.valueChanged.connect(
+            lambda *_: self._mark_dirty()
+        )
+        thruster_form.addRow("Deadband width:", self.thruster_deadband_width_input)
+
+        layout.addWidget(self.thruster_group)
+
+        # Initialise drag-related derived fields and control states.
         self._handle_drag_parameters_changed()
+        self._handle_thruster_options_changed(0)
         return group
 
     def _handle_drag_toggle(self, state: int) -> None:
         """Enable or disable drag configuration controls."""
-        enabled = state == Qt.CheckState.Checked
+        _ = state
+        enabled = bool(getattr(self, "drag_checkbox", None) and self.drag_checkbox.isChecked())
         if hasattr(self, "drag_params_group") and self.drag_params_group is not None:
             self.drag_params_group.setEnabled(enabled)
         self._mark_dirty()
@@ -254,6 +353,34 @@ class MissionTabMixin:
     def _handle_drag_parameters_changed(self) -> None:
         """React to drag parameter input changes."""
         self._update_drag_cd_area()
+        self._mark_dirty()
+
+    def _handle_thruster_options_changed(self, state: int) -> None:
+        """Enable or disable thruster controller configuration controls."""
+        _ = state
+        enabled = bool(
+            getattr(self, "thruster_enable_checkbox", None)
+            and self.thruster_enable_checkbox.isChecked()
+        )
+        for widget_name in (
+            "thruster_thrust_input",
+            "thruster_mass_input",
+            "thruster_target_altitude_input",
+            "thruster_deadband_width_input",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setEnabled(enabled)
+        self._mark_dirty()
+
+    def _handle_analysis_options_changed(self, state: int) -> None:
+        """React to analysis option toggles (e.g., ground-station passes)."""
+        _ = state
+        enabled = self.ground_pass_checkbox.isChecked()
+        # Only gate the inner controls (like min elevation) on this toggle, not
+        # the checkbox itself, so the user can always re-enable GS passes.
+        if hasattr(self, "min_elev_input") and self.min_elev_input is not None:
+            self.min_elev_input.setEnabled(enabled)
         self._mark_dirty()
 
     def _update_drag_cd_area(self) -> None:

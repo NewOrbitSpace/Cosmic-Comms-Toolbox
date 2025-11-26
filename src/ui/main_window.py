@@ -20,13 +20,15 @@ from PySide6.QtWidgets import (
 )
 from src.models import (
     AnalysisConfig,
+    AnalysisOptions,
     AnalysisResult,
     GroundStationConfig,
     GroundTrackPoint,
-    PassStatistic,
     OrbitConfig,
+    PassStatistic,
     PropagationConfig,
     ScenarioConfig,
+    ThrusterConfig,
 )
 from src.services.access_analysis import run_access_analysis
 from src.ui.constants import HIST_BIN_OPTIONS
@@ -35,6 +37,8 @@ from src.ui.tabs import (
     GroundTabMixin,
     LinkBudgetTabMixin,
     MissionTabMixin,
+    OrbitSummaryTabMixin,
+    ThrusterTabMixin,
     VisualizationTabMixin,
 )
 
@@ -52,6 +56,11 @@ if TYPE_CHECKING:
     )
 
 
+
+class AnalysisCancelledException(Exception):
+    """Raised internally to signal that the analysis was cancelled by the user."""
+
+
 class AnalysisWorker(QObject):
     """Background worker that executes the analysis and emits progress."""
 
@@ -67,6 +76,7 @@ class AnalysisWorker(QObject):
         super().__init__()
         self._config = config
         self._stations = stations
+        self._cancelled = False
 
     def run(self) -> None:
         try:
@@ -75,12 +85,19 @@ class AnalysisWorker(QObject):
                 self._stations,
                 progress_callback=self._emit_progress,
             )
+        except AnalysisCancelledException:
+            # Graceful cancellation: no result to emit, just stop the worker.
+            self.error.emit("Analysis cancelled by user.")
+            return
         except Exception as exc:  # pragma: no cover - GUI execution path
             self.error.emit(str(exc))
             return
         self.finished.emit(result)
 
     def _emit_progress(self, value: float) -> None:
+        # Allow cancellation to be picked up from within the Orekit sampling loop.
+        if getattr(self, "_cancelled", False):
+            raise AnalysisCancelledException()
         self.progress.emit(value)
 
 
@@ -89,6 +106,8 @@ class GroundStationApp(
     MissionTabMixin,
     VisualizationTabMixin,
     LinkBudgetTabMixin,
+    OrbitSummaryTabMixin,
+    ThrusterTabMixin,
     PlotHelpersMixin,
     QMainWindow,
 ):
@@ -127,6 +146,7 @@ class GroundStationApp(
         self._analysis_worker: AnalysisWorker | None = None
         self._pending_config: AnalysisConfig | None = None
         self.run_progress: QProgressBar | None = None
+        self.stop_button: QPushButton | None = None
         self.link_budget_station_combo: QComboBox | None = None
         self.link_budget_table: QTableWidget | None = None
         self.link_budget_summary_label: QLabel | None = None
@@ -170,6 +190,10 @@ class GroundStationApp(
         self._mission_globe_refresh_timer.setSingleShot(True)
         self._mission_globe_refresh_timer.setInterval(120)
         self._mission_globe_refresh_timer.timeout.connect(self._refresh_mission_globe)
+        # Thruster controller configuration used for the most recent run.
+        self._pending_thruster_config: dict | None = None
+        self._last_thruster_config: dict | None = None
+        self._last_thruster_summary: dict | None = None
         self._build_ui()
 
     def _set_run_button_state(self, state: str) -> None:
@@ -200,14 +224,20 @@ class GroundStationApp(
         root_layout = QVBoxLayout(central_widget)
         self.main_tabs = QTabWidget()
         root_layout.addWidget(self.main_tabs)
-        ground_tab = self._build_ground_station_tab()
         mission_tab = self._build_mission_analysis_tab()
+        ground_tab = self._build_ground_station_tab()
+        gs_stats_tab = self._build_analysis_tabs()
         visualization_tab = self._build_visualization_tab()
         link_budget_tab = self._build_link_budget_tab()
+        orbit_summary_tab = self._build_orbit_summary_tab()
+        thruster_tab = self._build_thruster_tab()
+        self.main_tabs.addTab(mission_tab, "Mission Configuration")
         self.main_tabs.addTab(ground_tab, "Ground Stations")
-        self.main_tabs.addTab(mission_tab, "Mission Analysis")
-        self.main_tabs.addTab(visualization_tab, "Visualization")
+        self.main_tabs.addTab(gs_stats_tab, "GS Pass Statistics")
+        self.main_tabs.addTab(visualization_tab, "GS Pass Visualization")
         self.main_tabs.addTab(link_budget_tab, "Link Budget")
+        self.main_tabs.addTab(orbit_summary_tab, "Orbit Summary")
+        self.main_tabs.addTab(thruster_tab, "Thruster Summary")
 
 
 
@@ -246,13 +276,36 @@ class GroundStationApp(
     def _handle_run_clicked(self) -> None:
         """Build the analysis configuration and execute it."""
         self._set_run_button_state("running")
-        stations = self._collect_active_stations_for_run()
-        self._active_station_lookup = {station.name: station for station in stations}
-        if not stations:
-            self._set_run_button_state("dirty")
-            return
+        perform_ground_passes = getattr(self, "ground_pass_checkbox", None)
+        ground_pass_enabled = (
+            perform_ground_passes.isChecked()
+            if perform_ground_passes is not None
+            else True
+        )
+
+        stations: list[GroundStationConfig] = []
+        primary_station: GroundStationConfig | None = None
+
+        if ground_pass_enabled:
+            stations = self._collect_active_stations_for_run()
+            self._active_station_lookup = {station.name: station for station in stations}
+            if not stations:
+                self._set_run_button_state("dirty")
+                return
+            primary_station = stations[0]
+        else:
+            # No ground-station analysis → no stations required.
+            self._active_station_lookup = {}
+            primary_station = None
+        # Snapshot the thruster/controller configuration for this run so that
+        # the post-simulation summary reflects the settings used at execution
+        # time, even if the user tweaks the inputs afterwards.
+        self._pending_thruster_config = self._collect_thruster_config_for_run()
         try:
-            config = self._build_config_from_inputs(primary_station=stations[0])
+            config = self._build_config_from_inputs(
+                primary_station=primary_station,
+                enable_ground_pass_analysis=ground_pass_enabled,
+            )
         except ValueError as exc:  # pragma: no cover - GUI validation
             QMessageBox.warning(self, "Invalid Input", str(exc))
             self._set_run_button_state("dirty")
@@ -269,6 +322,9 @@ class GroundStationApp(
             self.run_progress.show()
         self.run_button.setEnabled(False)
         self.run_button.hide()
+        if getattr(self, "stop_button", None) is not None:
+            self.stop_button.setEnabled(True)
+            self.stop_button.show()
 
     def _hide_run_progress_ui(self) -> None:
         """Restore the run button once analysis completes."""
@@ -276,6 +332,8 @@ class GroundStationApp(
             self.run_progress.hide()
         self.run_button.show()
         self.run_button.setEnabled(True)
+        if getattr(self, "stop_button", None) is not None:
+            self.stop_button.setEnabled(False)
 
     def _start_analysis_worker(
         self, config: AnalysisConfig, stations: list[GroundStationConfig]
@@ -296,6 +354,12 @@ class GroundStationApp(
         self._analysis_thread.finished.connect(self._cleanup_analysis_thread)
         self._analysis_thread.start()
 
+    def _handle_stop_clicked(self) -> None:
+        """Request cancellation of the currently running analysis, if any."""
+        worker = getattr(self, "_analysis_worker", None)
+        if worker is not None:
+            setattr(worker, "_cancelled", True)
+
     def _cleanup_analysis_thread(self) -> None:
         """Release worker references after the thread stops."""
         self._analysis_thread = None
@@ -313,6 +377,8 @@ class GroundStationApp(
         """Handle successful completion of the analysis."""
         self._current_config = self._pending_config
         self._pending_config = None
+        self._last_thruster_config = self._pending_thruster_config
+        self._pending_thruster_config = None
         if self._current_config is not None:
             self._visual_reference_epoch = self._current_config.scenario.start_time
         self._populate_results_table(result)
@@ -333,24 +399,37 @@ class GroundStationApp(
         self._refresh_visualization_pass_tabs(result)
         self._store_access_series(result)
         self._update_downlink_summary()
+        self._update_orbit_summary(result)
+        self._update_thruster_summary(result)
         self._update_run_progress(100.0)
         self._hide_run_progress_ui()
 
     def _handle_analysis_error(self, message: str) -> None:
         """Handle errors raised by the analysis worker."""
         self._pending_config = None
+        self._pending_thruster_config = None
         self._set_run_button_state("dirty")
         self._hide_run_progress_ui()
+        # Treat user-initiated cancellation as a non-fatal condition.
+        if message.strip().lower().startswith("analysis cancelled"):
+            return
         QMessageBox.critical(self, "Analysis Error", message)
 
     def _build_config_from_inputs(
-        self, primary_station: GroundStationConfig
+        self,
+        primary_station: GroundStationConfig | None,
+        *,
+        enable_ground_pass_analysis: bool,
     ) -> AnalysisConfig:
         """Translate widget state into a strongly-typed config."""
         start_dt = self._qdatetime_to_utc(self.start_datetime)
         end_dt = self._qdatetime_to_utc(self.end_datetime)
         if end_dt <= start_dt:
             raise ValueError("End time must be later than the start time.")
+        if enable_ground_pass_analysis and primary_station is None:
+            raise ValueError(
+                "Select at least one ground station when ground-station analysis is enabled."
+            )
         ground = primary_station
         orbit = OrbitConfig(
             semi_major_axis_km=self.sma_input.value(),
@@ -365,13 +444,40 @@ class GroundStationApp(
             min_elevation_deg=self.min_elev_input.value(),
             sample_step_seconds=float(self.sample_step_input.value()),
             enable_drag=self.drag_checkbox.isChecked(),
+            drag_area_m2=float(self.drag_area_input.value()),
+            drag_cd=float(self.drag_cd_input.value()),
         )
         scenario = ScenarioConfig(start_time=start_dt, end_time=end_dt)
+        options = AnalysisOptions(
+            compute_ground_station_passes=enable_ground_pass_analysis
+        )
+        # Thruster/controller configuration is optional and lives alongside the
+        # core propagation settings so that services can reproduce controller
+        # behaviour for diagnostics (e.g., force plots) without affecting the
+        # underlying orbital dynamics.
+        thruster_cfg: ThrusterConfig | None = None
+        if getattr(self, "thruster_enable_checkbox", None) is not None:
+            if self.thruster_enable_checkbox.isChecked():
+                thrust = float(self.thruster_thrust_input.value())
+                mass = float(self.thruster_mass_input.value())
+                if thrust <= 0.0:
+                    raise ValueError("Thruster thrust must be positive when enabled.")
+                if mass <= 0.0:
+                    raise ValueError("Spacecraft mass must be positive when thrust is enabled.")
+                thruster_cfg = ThrusterConfig(
+                    enabled=True,
+                    thrust_N=thrust,
+                    mass_kg=mass,
+                    target_altitude_km=float(self.thruster_target_altitude_input.value()),
+                    deadband_width_km=float(self.thruster_deadband_width_input.value()),
+                )
         return AnalysisConfig(
             ground_station=ground,
             orbit=orbit,
             propagation=propagation,
             scenario=scenario,
+            options=options,
+            thruster=thruster_cfg,
         )
 
     def _qdatetime_to_utc(self, widget) -> datetime:
@@ -417,6 +523,19 @@ class GroundStationApp(
 
     def _update_summary_label(self, result) -> None:
         """Show the aggregated statistics to the user."""
+        # If ground-station analysis was disabled, show a dedicated message.
+        if (
+            getattr(self, "_current_config", None) is not None
+            and getattr(self._current_config, "options", None) is not None
+            and not self._current_config.options.compute_ground_station_passes
+        ):
+            self.summary_label.setText(
+                "Ground-station pass analysis was disabled for this run."
+            )
+            if self.analysis_context_label is not None:
+                self.analysis_context_label.setText("Ground-station analysis disabled.")
+            return
+
         summary = result.summary
         base_text = (
             f"Passes: {summary.total_passes} | Total Access: {summary.total_access_minutes:.1f} min | "
