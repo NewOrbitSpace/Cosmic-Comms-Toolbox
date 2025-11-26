@@ -9,12 +9,14 @@ from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QMessageBox,
+    QPushButton,
     QSplitter,
     QTabWidget,
     QTableWidget,
@@ -156,6 +158,9 @@ class LinkBudgetTabMixin:
         )
         self.link_budget_summary_label.setWordWrap(True)
         table_layout.addWidget(self.link_budget_summary_label)
+        export_button = QPushButton("Export to Excel")
+        export_button.clicked.connect(self._export_link_budget_to_xlsx)
+        table_layout.addWidget(export_button)
         plot_tab = QWidget()
         plot_layout = QVBoxLayout(plot_tab)
         self.link_budget_plot = pg.PlotWidget(title="VCM System Performance")
@@ -711,4 +716,106 @@ class LinkBudgetTabMixin:
             if num_orbits > 0:
                 per_orbit = total_gibit / num_orbits
         return (total_gibit, per_orbit)
+
+    def _export_link_budget_to_xlsx(self) -> None:
+        """Export the link budget table to an Excel file with formatting."""
+        if not self.link_budget_table or self.link_budget_table.rowCount() == 0:
+            QMessageBox.warning(
+                self,
+                "Export Error",
+                "No link budget data to export. Please calculate the link budget first.",
+            )
+            return
+
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Alignment, Font, PatternFill
+        except ImportError:
+            QMessageBox.critical(
+                self,
+                "Import Error",
+                "openpyxl is not installed. Please install it using: pip install openpyxl",
+            )
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Link Budget",
+            "link_budget.xlsx",
+            "Excel Files (*.xlsx)",
+        )
+
+        if not file_path:
+            return
+
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Link Budget"
+
+            highlight_rows = {
+                "EIRP",
+                "Received Signal Power",
+                "Maximum Information Rate",
+                "Max. Information Rate",
+                "Link Margin",
+            }
+            highlight_color = "1B5E20"
+
+            headers = []
+            for col in range(self.link_budget_table.columnCount()):
+                header_item = self.link_budget_table.horizontalHeaderItem(col)
+                headers.append(header_item.text() if header_item else "")
+            ws.append(headers)
+
+            for col_idx, _ in enumerate(headers, start=1):
+                cell = ws.cell(row=1, column=col_idx)
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+
+            for row in range(self.link_budget_table.rowCount()):
+                row_data = []
+                for col in range(self.link_budget_table.columnCount()):
+                    item = self.link_budget_table.item(row, col)
+                    row_data.append(item.text() if item else "")
+                ws.append(row_data)
+
+                parameter_name = row_data[0] if row_data else ""
+                is_highlight = parameter_name in highlight_rows
+
+                for col_idx in range(1, self.link_budget_table.columnCount() + 1):
+                    cell = ws.cell(row=row + 2, column=col_idx)
+
+                    if col_idx == 1:
+                        cell.alignment = Alignment(horizontal="left", vertical="center")
+                    elif col_idx == 2:
+                        cell.alignment = Alignment(horizontal="right", vertical="center")
+                    else:
+                        cell.alignment = Alignment(horizontal="left", vertical="center")
+
+                    if is_highlight:
+                        cell.font = Font(bold=True, color="FFFFFF")
+                        cell.fill = PatternFill(
+                            start_color=highlight_color,
+                            end_color=highlight_color,
+                            fill_type="solid",
+                        )
+
+            ws.column_dimensions["A"].width = 30
+            ws.column_dimensions["B"].width = 15
+            ws.column_dimensions["C"].width = 12
+
+            wb.save(file_path)
+            QMessageBox.information(
+                self,
+                "Export Successful",
+                f"Link budget exported successfully to:\n{file_path}",
+            )
+
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Export Error",
+                f"Failed to export link budget:\n{str(exc)}",
+            )
 
